@@ -1,0 +1,156 @@
+fileConfigs:
+  01_sources.conf: |-
+    ## logs from podman
+    <source>
+      @type tail
+      @id in_tail_container_logs
+      @label @KUBERNETES
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      exclude_path ["/var/log/containers/fluent*"]
+      tag kubernetes.*
+      read_from_head true    
+      <parse>
+        @type multi_format
+        <pattern>
+          format json
+          time_key timestamp
+          keep_time_key true
+          add_newline false
+        </pattern>        
+        <pattern>
+          format regexp
+          expression /^(?<time>.+) (?<stream>stdout|stderr)( (.))? (?<log>.*)$/
+          time_format '%Y-%m-%dT%H:%M:%S.%NZ'
+          keep_time_key true
+        </pattern>
+      </parse>
+      emit_unmatched_lines true
+    </source>
+
+  02_filters.conf: |-
+    <label @KUBERNETES>
+      <match kubernetes.var.log.containers.fluentd**>
+        @type relabel
+        @label @FLUENT_LOG
+      </match>
+
+      # <match kubernetes.var.log.containers.**_kube-system_**>
+      #   @type null
+      #   @id ignore_kube_system_logs
+      # </match>
+
+      <filter kubernetes.**>
+        @type kubernetes_metadata
+        @id filter_kube_metadata
+        skip_labels false
+        skip_container_metadata false
+        skip_namespace_metadata true
+        skip_master_url true
+      </filter>
+
+      <filter kubernetes.**>
+        @type grep
+          <exclude>
+            key log
+            pattern /excluded/
+          </exclude>
+          <inject>
+            time_key fluentd_time
+            time_type string
+            time_format %Y-%m-%dT%H:%M:%S.%NZ
+            tag_key fluentd_tag
+          </inject>          
+      </filter>
+
+      <filter kubernetes.**>
+        @type concat
+        key log
+        separator ""
+        # n_lines 10
+        multiline_start_regexp  /ERROR:app:Exception on \/custom-exception/
+        multiline_end_regexp /error.ValueTooSmallError/
+        #continuous_line_regexp nil
+        #stream_identity_key nil
+        #flush_interval 60
+        #timeout_label nil
+        #use_first_timestamp false
+        #partial_key nil
+        #partial_value nil
+        #keep_partial_key false
+        #use_partial_metadata false
+        #keep_partial_metadata false
+        #partial\_metadata\_format docker-fluentd
+        #use\_partial\_cri\_logtag false
+        #partial\_cri\_logtag\_key nil
+        #partial\_cri\_stream\_key stream
+      </filter>
+      <filter kubernetes.**>
+        @type parser
+        key_name log
+        reserve_data true
+        replace_invalid_sequence false
+        emit_invalid_record_to_error false
+        <parse>
+          @type regexp
+          expression /Some logs are very (?<sizeOfLogs>[^ ]*)[a-zA-z\n ]*/
+        </parse>
+      </filter>
+    <filter kubernetes.**>
+      @type parser
+      key_name log
+      <parse>
+        @type json
+        json_parser json
+      </parse>
+      replace_invalid_sequence true
+      reserve_data true # this preserves unparsable log lines
+      emit_invalid_record_to_error false # In case of unparsable log lines keep the error log clean
+      reserve_time # the time was already parsed in the source, we don't want to overwrite it with current time.
+    </filter>
+
+      <match **>
+        @type relabel
+        @label @DISPATCH
+      </match>
+    </label>
+
+  03_dispatch.conf: |-
+    <label @DISPATCH>
+      <filter **>
+        @type prometheus
+        <metric>
+          name fluentd_input_status_num_records_total
+          type counter
+          desc The total number of incoming records
+          <labels>
+            tag ${tag}
+            hostname ${hostname}
+          </labels>
+        </metric>
+      </filter>
+
+      <match **>
+        @type relabel
+        @label @OUTPUT
+      </match>
+    </label>
+
+  04_outputs.conf: |-
+    <label @OUTPUT>
+      <match **>
+        @type elasticsearch
+        host "elasticsearch-master"
+        port 9200
+        path ""
+        logstash_format true
+      </match>
+    </label>
+
+        #       @type multiline
+        # <pattern>
+        #   format_firstline /^[a-z]*Some logs are very big/
+        #   format1 /^[a-z]*Some (?<entity>) are very big in nature and hence/
+        # <pattern>
+
+        # [0-9]{4}\-[0-9]{2}\-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]+\.[0-9]{2}\.[0-9]+ INFO 1080 no expectation for:
